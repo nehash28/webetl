@@ -1,0 +1,62 @@
+# REST API -> SQLite (upsert) + Parquet data lake, incremental by updated_at.
+# Demo source: python examples/mock_server.py  (token: demo-token)
+name: products_api
+
+source:
+  type: api
+  url: ${API_BASE_URL:-http://127.0.0.1:8765}/api/products
+  auth:
+    type: bearer
+    token: ${PRODUCTS_API_TOKEN:-demo-token}
+  records_path: data.items          # where the list of records lives in the JSON body
+  pagination:
+    type: page
+    page_param: page
+    size_param: per_page
+    size: 20
+    max_pages: 500
+  incremental:
+    field: updated_at               # watermark = max(updated_at) of the last successful run
+    param: updated_since            # sent to the API on the next run
+  rate_limit_per_sec: 5
+  retries: 5
+  timeout: 30
+
+# Land untouched source records (bronze zone) before transforming.
+raw:
+  path: ${LAKE_PATH:-data/lake}/raw
+
+transform:
+  - flatten: {sep: "_"}             # price.amount -> price_amount
+  - rename: {price_amount: price, price_currency: currency}
+  - strip: [name]
+  - map_values: {in_stock: {"yes": true, "no": false}}
+  - drop: [tags]
+  - dedupe: {keys: [id]}
+
+schema:                             # typed, validated output; bad rows go to rejects
+  columns:
+    id: {type: int, required: true}
+    name: {type: str, required: true}
+    price: {type: float, required: true}
+    currency: str
+    category: str
+    in_stock: bool
+    updated_at: {type: datetime, required: true}
+  extra: drop
+
+max_reject_ratio: 0.1               # fail the run if more than 10% of rows are rejected
+
+load:
+  - type: sql
+    name: warehouse
+    url: ${DATABASE_URL:-sqlite:///data/warehouse.db}
+    table: products
+    key: [id]
+    mode: upsert
+  - type: lake
+    name: lake
+    path: ${LAKE_PATH:-data/lake}/curated
+    format: parquet
+    partition_by: [category]
+    compression: snappy

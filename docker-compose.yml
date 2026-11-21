@@ -1,0 +1,93 @@
+# webetl stack:  docker compose up -d --build
+#
+#   Airflow UI   http://localhost:8080   schedules and runs every pipeline
+#   Dashboard    http://localhost:8501   gold tables, run history, data quality
+#   PostgreSQL   localhost:5432          warehouse (user webetl / password webetl)
+#   Mock API     http://localhost:8765   demo source for products_medallion
+#
+# Secrets (email, Slack) go in a .env file next to this one: copy .env.example.
+# This setup is for a laptop / demo: fixed local passwords and no Airflow login.
+
+# The warehouse is the local Postgres container unless WAREHOUSE_URL is set in .env
+# (e.g. a Neon cloud database for a public Streamlit Cloud dashboard).
+x-webetl-env: &webetl-env
+  DATABASE_URL: ${WAREHOUSE_URL:-postgresql+psycopg2://webetl:webetl@postgres:5432/warehouse}
+  RUN_HISTORY_URL: ${WAREHOUSE_URL:-postgresql+psycopg2://webetl:webetl@postgres:5432/warehouse}
+  LAKE_PATH: /data/lake
+  API_BASE_URL: http://mock-api:8765
+  WEBETL_STATE: /data/state/state.db
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: webetl
+      POSTGRES_PASSWORD: webetl
+      POSTGRES_DB: warehouse
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init.sql:/docker-entrypoint-initdb.d/10-airflow.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U webetl -d warehouse"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  mock-api:
+    build: .
+    entrypoint: ["python", "examples/mock_server.py", "--host", "0.0.0.0", "--port", "8765"]
+    ports:
+      - "8765:8765"
+    restart: unless-stopped
+
+  airflow:
+    build:
+      context: .
+      dockerfile: docker/airflow.Dockerfile
+    command: standalone
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *webetl-env
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "True"   # local demo: no login screen
+      WEBETL_CONFIG_DIR: /opt/webetl/configs
+      WEBETL_DATA_DIR: /data
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./configs:/opt/webetl/configs:ro
+      - etl-data:/data
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-api:
+        condition: service_started
+    restart: unless-stopped
+
+  dashboard:
+    build: .
+    entrypoint: ["python", "-m", "streamlit", "run", "dashboard.py",
+                 "--server.address", "0.0.0.0", "--server.port", "8501", "--server.headless", "true"]
+    environment:
+      <<: *webetl-env
+    volumes:
+      - etl-data:/data
+    ports:
+      - "8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  etl-data:

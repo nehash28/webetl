@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "webetl"
+version = "0.1.0"
+description = "Config-driven ETL: extract from web APIs and HTML pages, transform to structured records, load into SQL databases and data lakes."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "beautifulsoup4>=4.12",
+    "lxml>=4.9",
+    "PyYAML>=6.0",
+    "python-dateutil>=2.8",
+    "SQLAlchemy>=2.0",
+    "pyarrow>=14",
+    "fsspec>=2023.1",
+    "duckdb>=1.0",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg2-binary>=2.9"]
+s3 = ["s3fs>=2023.1"]
+gcs = ["gcsfs>=2023.1"]
+azure = ["adlfs>=2023.1"]
+dashboard = ["streamlit>=1.40"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+webetl = "webetl.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,56 @@
+# HTML scraping -> SQLite + JSONL/Parquet lake.
+# Real target: https://books.toscrape.com (a public sandbox built for scraping practice).
+# Local demo:  BOOKS_BASE_URL=http://127.0.0.1:8765 webetl run configs/books_scrape.yaml
+name: books_scrape
+
+source:
+  type: html
+  url: ${BOOKS_BASE_URL:-https://books.toscrape.com}/catalogue/page-1.html
+  item_selector: article.product_pod
+  fields:
+    title: {selector: "h3 a", attr: title}
+    url: {selector: "h3 a", attr: href}           # made absolute automatically
+    price: p.price_color
+    rating: {selector: p.star-rating, attr: class, regex: "star-rating (\\w+)"}
+    availability: p.availability
+  pagination:
+    next_selector: li.next a
+    max_pages: 5
+  follow:                                          # visit each detail page for more fields
+    url_field: url
+    fields:
+      upc: {selector: "table.table-striped td"}
+      description: {selector: "#product_description + p", default: null}
+  respect_robots: true
+  rate_limit_per_sec: 4
+  user_agent: "webetl-demo/0.1 (contact: data-team@example.com)"
+
+transform:
+  - map_values:
+      rating: {One: 1, Two: 2, Three: 3, Four: 4, Five: 5}
+  - derive: {in_stock: "{availability}"}
+  - map_values:
+      in_stock: {"In stock": true, "Out of stock": false}
+  - drop: [availability, _page_url]
+  - require: [upc, title]
+  - dedupe: {keys: [upc]}
+
+schema:
+  columns:
+    upc: {type: str, required: true}
+    title: {type: str, required: true}
+    price: {type: float, required: true}   # "£51.77" -> 51.77
+    rating: int
+    in_stock: bool
+    url: str
+    description: str
+
+load:
+  - type: sql
+    url: ${DATABASE_URL:-sqlite:///data/warehouse.db}
+    table: books
+    key: [upc]
+  - type: lake
+    path: ${LAKE_PATH:-data/lake}/curated
+    format: parquet
+    partition_by: [ingest_date]

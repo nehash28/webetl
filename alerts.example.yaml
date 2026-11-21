@@ -1,0 +1,16 @@
+# Shared alert settings for every pipeline that has no `alerts:` block of its own:
+#   webetl --alerts alerts.example.yaml run configs/
+# Put the secrets in environment variables or a .env file, never in this file.
+alerts:
+  notify_on: [failure]
+  slack:
+    webhook_url: ${SLACK_WEBHOOK_URL:-}
+    mention: "<!channel>"
+  email:
+    smtp_host: ${SMTP_HOST:-}
+    smtp_port: ${SMTP_PORT:-587}
+    security: starttls
+    username: ${SMTP_USER:-}
+    password: ${SMTP_PASSWORD:-}
+    from: ${ALERT_EMAIL_FROM:-webetl@example.com}
+    to: ["${ALERT_EMAIL_TO:-data-team@example.com}"]

@@ -1,0 +1,119 @@
+# Bronze -> silver -> gold data lake with Slack + email alerts.
+# Demo source: python examples/mock_server.py   (token: demo-token)
+#
+#   bronze  data/lake/bronze/products_medallion/ingest_date=.../*.jsonl.gz   raw API responses
+#   silver  data/lake/silver/products_medallion/ingest_date=.../*.parquet    typed, validated rows
+#   gold    data/lake/gold/products_medallion/<model>.parquet                business tables
+#           + gold_<model> tables in the SQLite warehouse for dashboards / BI tools
+name: products_medallion
+
+source:
+  type: api
+  url: ${API_BASE_URL:-http://127.0.0.1:8765}/api/products
+  auth: {type: bearer, token: "${PRODUCTS_API_TOKEN:-demo-token}"}
+  records_path: data.items
+  pagination: {type: page, page_param: page, size_param: per_page, size: 20}
+  incremental: {field: updated_at, param: updated_since}
+
+transform:
+  - flatten: {sep: "_"}
+  - rename: {price_amount: price, price_currency: currency}
+  - strip: [name]
+  - map_values: {in_stock: {"yes": true, "no": false}}
+  - drop: [tags]
+  - dedupe: {keys: [id]}
+
+schema:
+  columns:
+    id: {type: int, required: true}
+    name: {type: str, required: true}
+    price: {type: float, required: true}
+    currency: str
+    category: str
+    in_stock: bool
+    updated_at: {type: datetime, required: true}
+  extra: drop
+
+max_reject_ratio: 0.1
+
+medallion:
+  root: ${LAKE_PATH:-data/lake}          # or s3://my-bucket/lake (pip install -e ".[s3]")
+  bronze: true
+  silver:
+    partition_by: [ingest_date]
+    key: [id]                            # `silver` view = latest version of each product
+  gold:
+    warehouse: ${DATABASE_URL:-sqlite:///data/warehouse.db}
+    models:
+      - name: category_summary
+        sql: |
+          SELECT category,
+                 COUNT(*)                                   AS products,
+                 COUNT(*) FILTER (WHERE in_stock)          AS in_stock,
+                 ROUND(AVG(price), 2)                       AS avg_price,
+                 MIN(price)                                 AS min_price,
+                 MAX(price)                                 AS max_price
+          FROM silver
+          GROUP BY category
+          ORDER BY products DESC
+      - name: price_bands
+        sql: |
+          SELECT CASE WHEN price < 50  THEN '1. under 50'
+                      WHEN price < 100 THEN '2. 50-99'
+                      WHEN price < 150 THEN '3. 100-149'
+                      ELSE '4. 150+' END AS price_band,
+                 COUNT(*) AS products
+          FROM silver
+          GROUP BY 1
+          ORDER BY 1
+      - name: out_of_stock
+        sql: |
+          SELECT id, name, category, price, updated_at
+          FROM silver
+          WHERE NOT in_stock
+          ORDER BY category, price DESC
+      - name: daily_loads                 # uses full history, not just the latest rows
+        sql: |
+          SELECT ingest_date, COUNT(*) AS rows_loaded, COUNT(DISTINCT id) AS products
+          FROM silver_all
+          GROUP BY ingest_date
+          ORDER BY ingest_date
+
+# Data quality checks: run after every load. error -> run fails + alert; warn -> warning alert.
+checks:
+  - {name: ids_unique, type: unique, table: silver, columns: [id]}
+  - {name: names_present, type: not_null, columns: [name, category]}
+  - {name: prices_in_range, type: range, column: price, min: 0.01, max: 10000}
+  - name: known_categories
+    type: accepted_values
+    column: category
+    values: [books, electronics, garden, toys]
+    severity: warn                       # a new category is worth a look, not a failed run
+  - {name: run_not_empty, type: row_count, table: run, min: 1, severity: warn}
+  - {name: silver_has_data, type: row_count, table: silver, min: 50}
+  - {name: loaded_recently, type: freshness, column: _etl_loaded_at, max_age_hours: 24}
+  - name: stock_not_above_total          # custom SQL against a gold table: must return 0
+    sql: SELECT COUNT(*) FROM category_summary WHERE in_stock > products
+
+schedule: "*/30 * * * *"                 # used by the Airflow DAGs (docker compose)
+
+alerts:
+  notify_on: [failure, warning, rejects]        # add `success` for a heartbeat
+  slack:
+    webhook_url: ${SLACK_WEBHOOK_URL:-}  # empty -> Slack is skipped
+    mention: "<!channel>"
+  email:
+    smtp_host: ${SMTP_HOST:-}            # empty -> email is skipped
+    smtp_port: ${SMTP_PORT:-587}
+    security: starttls
+    username: ${SMTP_USER:-}
+    password: ${SMTP_PASSWORD:-}
+    from: ${ALERT_EMAIL_FROM:-webetl@example.com}
+    to: ["${ALERT_EMAIL_TO:-data-team@example.com}"]
+
+load:
+  - type: sql
+    name: warehouse
+    url: ${DATABASE_URL:-sqlite:///data/warehouse.db}
+    table: products
+    key: [id]

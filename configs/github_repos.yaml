@@ -1,0 +1,54 @@
+# Real public API example: GitHub repository search with Link-header pagination.
+# export GITHUB_TOKEN=ghp_...   then:  webetl run configs/github_repos.yaml
+name: github_etl_repos
+
+source:
+  type: api
+  url: https://api.github.com/search/repositories
+  params:
+    q: "topic:etl"
+    sort: updated
+    order: desc
+    per_page: 100
+  headers:
+    Accept: application/vnd.github+json
+    X-GitHub-Api-Version: "2022-11-28"
+  auth:
+    type: bearer
+    token: ${GITHUB_TOKEN}
+  records_path: items
+  pagination:
+    type: link_header
+    max_pages: 10                  # search API caps results at 1000
+  incremental:
+    field: updated_at              # filtered client-side; upserts keep it idempotent
+  rate_limit_per_sec: 0.5
+
+transform:
+  - select: [id, full_name, html_url, description, language, stargazers_count,
+             forks_count, open_issues_count, license, owner, topics, created_at, updated_at]
+  - flatten: {sep: "_", max_depth: 1}
+  - select: [id, full_name, html_url, description, language, stargazers_count,
+             forks_count, open_issues_count, license_spdx_id, owner_login, topics,
+             created_at, updated_at]
+
+schema:
+  columns:
+    id: {type: int, required: true}
+    full_name: {type: str, required: true}
+    stargazers_count: int
+    forks_count: int
+    open_issues_count: int
+    topics: json
+    created_at: datetime
+    updated_at: datetime
+
+load:
+  - type: sql
+    url: ${DATABASE_URL:-sqlite:///data/warehouse.db}
+    table: github_repos
+    key: [id]
+  - type: lake
+    path: ${LAKE_PATH:-data/lake}/curated     # or s3://bucket/lake with `pip install webetl[s3]`
+    format: parquet
+    partition_by: [language]

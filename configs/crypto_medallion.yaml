@@ -1,0 +1,91 @@
+# Real public API: CoinGecko top-250 coins -> bronze/silver/gold lake, with alerts.
+# Free, no key needed for light use (check CoinGecko's current rate limits and terms).
+# Schedule every 30 min to build a price history:  */30 * * * * webetl run configs/crypto_medallion.yaml
+name: crypto_markets
+
+source:
+  type: api
+  url: https://api.coingecko.com/api/v3/coins/markets
+  params:
+    vs_currency: usd
+    order: market_cap_desc
+    price_change_percentage: 24h
+  headers:
+    x-cg-demo-api-key: ${COINGECKO_API_KEY:-}   # optional free demo key
+  pagination: {type: page, page_param: page, size_param: per_page, size: 250, max_pages: 1}
+  rate_limit_per_sec: 0.3
+  retries: 5
+
+transform:
+  - select: [id, symbol, name, current_price, market_cap, market_cap_rank, total_volume,
+             price_change_percentage_24h, circulating_supply, last_updated]
+  - rename: {current_price: price_usd, price_change_percentage_24h: change_24h_pct}
+
+schema:
+  columns:
+    id: {type: str, required: true}
+    symbol: str
+    name: str
+    price_usd: {type: float, required: true}
+    market_cap: float
+    market_cap_rank: int
+    total_volume: float
+    change_24h_pct: float
+    circulating_supply: float
+    last_updated: datetime
+
+min_records: 50                     # fail (and alert) if the API suddenly returns almost nothing
+
+medallion:
+  root: ${LAKE_PATH:-data/lake}
+  silver:
+    partition_by: [ingest_date]
+    key: [id]                       # `silver` = latest snapshot per coin; `silver_all` = every snapshot
+  gold:
+    warehouse: ${DATABASE_URL:-sqlite:///data/warehouse.db}
+    models:
+      - name: top_movers_24h
+        sql: |
+          SELECT name, symbol, price_usd, change_24h_pct, market_cap_rank
+          FROM silver WHERE market_cap_rank <= 100
+          ORDER BY abs(change_24h_pct) DESC LIMIT 20
+      - name: market_overview
+        sql: |
+          SELECT COUNT(*) AS coins,
+                 SUM(market_cap) AS total_market_cap_usd,
+                 SUM(total_volume) AS total_volume_usd,
+                 ROUND(AVG(change_24h_pct), 2) AS avg_change_24h_pct,
+                 COUNT(*) FILTER (WHERE change_24h_pct > 0) AS gainers,
+                 COUNT(*) FILTER (WHERE change_24h_pct < 0) AS losers
+          FROM silver
+      - name: daily_price_history     # one row per coin per day, from every snapshot
+        sql: |
+          SELECT id, symbol, CAST(last_updated AS DATE) AS day,
+                 MIN(price_usd) AS low, MAX(price_usd) AS high,
+                 arg_min(price_usd, last_updated) AS open, arg_max(price_usd, last_updated) AS close
+          FROM silver_all
+          GROUP BY ALL ORDER BY id, day
+
+checks:
+  - {name: coin_ids_unique, type: unique, table: run, columns: [id]}
+  - {name: prices_positive, type: range, table: run, column: price_usd, min: 0.00000001}
+  - {name: ranks_present, type: not_null, table: run, columns: [market_cap_rank], severity: warn}
+  - {name: full_page_returned, type: row_count, table: run, min: 200}
+  - {name: prices_are_fresh, type: freshness, table: run, column: last_updated, max_age_hours: 2, severity: warn}
+  - name: top_movers_complete
+    sql: SELECT CASE WHEN COUNT(*) = 20 THEN 0 ELSE 1 END FROM top_movers_24h
+
+schedule: "*/30 * * * *"           # used by the Airflow DAGs (docker compose)
+
+alerts:
+  notify_on: [failure, warning]
+  slack: {webhook_url: "${SLACK_WEBHOOK_URL:-}"}
+  email:
+    smtp_host: ${SMTP_HOST:-}
+    smtp_port: ${SMTP_PORT:-587}
+    username: ${SMTP_USER:-}
+    password: ${SMTP_PASSWORD:-}
+    from: ${ALERT_EMAIL_FROM:-webetl@example.com}
+    to: ["${ALERT_EMAIL_TO:-data-team@example.com}"]
+
+load: []                            # the medallion lake is the only target
