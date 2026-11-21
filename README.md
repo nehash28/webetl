@@ -1,5 +1,60 @@
 # webetl — config-driven web ETL pipeline
 
+**🔗 Live dashboard: [webetl on Streamlit](https://webetl-j9wfuap3a4jsou6unnvvkz.streamlit.app)** · Python · Airflow · PostgreSQL · DuckDB · Docker
+
+## What I built
+
+**webetl** is an end-to-end data pipeline. It collects data from web APIs and websites, cleans and validates it, stores it in a layered data lake and a cloud warehouse, and publishes it to a public dashboard. It runs on a schedule, checks its own data quality, and emails me when something goes wrong.
+
+```mermaid
+flowchart LR
+    A["Web sources<br/>CoinGecko API, REST APIs,<br/>scraped web pages"] --> B["Extract<br/>pagination, auth,<br/>retries, rate limits"]
+    B --> C[("Bronze<br/>raw JSON")]
+    C --> D["Transform<br/>clean, type, validate"]
+    D --> E[("Silver<br/>typed Parquet")]
+    D -. bad rows .-> R["Rejects file"]
+    E --> F[("Gold<br/>SQL summary tables")]
+    F --> G["Data quality<br/>checks"]
+    F --> H[("Neon<br/>PostgreSQL")]
+    H --> I["Public Streamlit<br/>dashboard"]
+    G -. failure .-> J["Email / Slack<br/>alert"]
+    K["Apache Airflow<br/>every 30 min"] -. schedules .-> B
+```
+
+### Highlights
+
+- **Config-driven pipelines.** Adding a new data source means writing a YAML file, not new code. The same engine handles REST APIs (page, offset, cursor, next-URL and link-header pagination; bearer, basic and API-key auth) and HTML scraping (CSS selectors, next-page links, detail pages, robots.txt).
+- **Medallion data lake.** Raw data is kept in **bronze**, so it can be reprocessed without calling the source again. **Silver** holds typed, validated Parquet with full history. **Gold** tables are defined in SQL and built with DuckDB.
+- **Data quality checks.** Rules like *unique IDs*, *prices in range* or *data loaded in the last 24 hours* run after every load. A failed `error` rule fails the run and sends an alert; a failed `warn` rule sends a warning. Bad records go to a rejects file with the reason, instead of being silently dropped.
+- **Reliable by design.** Incremental loading with watermarks, idempotent upserts (re-running never creates duplicates), all-or-nothing writes, and HTTP retries with backoff.
+- **Orchestration.** Apache Airflow turns every config into a DAG automatically and runs it on its schedule. A failed pipeline shows up red in Airflow and sends an email.
+- **Production-style deployment.** The whole stack (Airflow, PostgreSQL, dashboard, demo API) starts with one `docker compose` command. The warehouse runs on **Neon** (cloud PostgreSQL), and the public dashboard connects with a **read-only** database login.
+- **Tested.** 60 automated tests, including end-to-end runs against a mock API, a fake Slack webhook and SMTP server, and a real PostgreSQL database.
+
+### Tech stack
+
+| Area | Tools |
+|---|---|
+| Language | Python 3.12 |
+| Extraction | requests (retries, rate limiting), BeautifulSoup, lxml |
+| Storage | Parquet (PyArrow), JSONL, DuckDB, PostgreSQL (Neon), SQLite, SQLAlchemy 2 |
+| Orchestration | Apache Airflow 3 |
+| Infrastructure | Docker, Docker Compose |
+| Dashboard | Streamlit, Altair, hosted on Streamlit Community Cloud |
+| Alerts | SMTP email, Slack webhooks |
+| Testing | pytest |
+
+### What I learned
+
+- **Designing a medallion architecture:** why keeping raw data matters, and how separating cleaning (silver) from business logic (gold) makes a pipeline easier to change.
+- **Building pipelines that fail safely:** watermarks only advance after a successful load, partial files are rolled back, and data quality problems are loud instead of silent.
+- **Running real infrastructure:** containerising a multi-service stack, scheduling it with Airflow, and connecting a laptop pipeline to a cloud database.
+- **Security basics:** keeping secrets out of Git with `.env`, and giving a public app a read-only database login instead of full access.
+
+---
+
+## Documentation
+
 Extract data from **REST APIs** and **web pages (scraping)**, transform it into **typed, validated records**, and load it into **SQL databases** and **data lakes**. Each pipeline is one YAML file, so you don't write code for each new source.
 
 It can organise the lake as a **bronze → silver → gold medallion architecture** with SQL-defined gold tables, run **data quality checks**, send **Slack and email alerts**, and run on a schedule with **Apache Airflow + PostgreSQL in Docker Compose**, with a **Streamlit dashboard** on top.
